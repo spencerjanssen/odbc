@@ -32,6 +32,7 @@ module Database.ODBC.Internal
   , Value(..)
   , Binary(..)
   , Column(..)
+  , BindParameter(..)
     -- * Streaming results
   , stream
   , Step(..)
@@ -48,6 +49,7 @@ import           Control.Monad.IO.Class
 import           Control.Monad.IO.Unlift
 import           Data.Hashable
 import           Data.ByteString (ByteString)
+import qualified Data.ByteString as S
 import qualified Data.ByteString.Unsafe as S
 import           Data.Coerce
 import           Data.Data
@@ -175,6 +177,10 @@ data Column = Column
   , columnName :: !Text
   } deriving (Show)
 
+data BindParameter
+  = BindText !Text
+  | BindByteString !ByteString
+
 --------------------------------------------------------------------------------
 -- Exposed functions
 
@@ -247,35 +253,38 @@ exec ::
      MonadIO m
   => Connection -- ^ A connection to the database.
   -> Text -- ^ SQL statement.
+  -> [BindParameter] -- ^ Input parameters to be bound to the query.
   -> m ()
-exec conn string =
+exec conn string params =
   withBound
     (withHDBC
        conn
        "exec"
-       (\dbc -> withExecDirect dbc string (fetchAllResults dbc)))
+       (\dbc -> withExecDirect dbc string params (fetchAllResults dbc)))
 
 -- | Query and return a list of rows.
 query ::
      MonadIO m
   => Connection -- ^ A connection to the database.
   -> Text -- ^ SQL query.
+  -> [BindParameter] -- ^ Input parameters to be bound to the query.
   -> m [[(Column, Value)]]
   -- ^ A strict list of rows. This list is not lazy, so if you are
   -- retrieving a large data set, be aware that all of it will be
   -- loaded into memory.
-query conn string =
+query conn string params =
   withBound
     (withHDBC
        conn
        "query"
-       (\dbc -> withExecDirect dbc string (fetchStatementRows dbc)))
+       (\dbc -> withExecDirect dbc string params (fetchStatementRows dbc)))
 
 -- | Stream results like a fold with the option to stop at any time.
 stream ::
      (MonadIO m, MonadUnliftIO m)
   => Connection -- ^ A connection to the database.
   -> Text -- ^ SQL query.
+  -> [BindParameter] -- ^ Input parameters to be bound to the query.
   -> (state -> [(Column, Value)] -> m (Step state))
   -- ^ A stepping function that gets as input the current @state@ and
   -- a row, returning either a new @state@ or a final @result@.
@@ -284,7 +293,7 @@ stream ::
   -- evaluated each iteration.
   -> m state
   -- ^ Final result, produced by the stepper function.
-stream conn string step state = do
+stream conn string params step state = do
   unlift <- askUnliftIO
   withBound
     (withHDBC
@@ -294,6 +303,7 @@ stream conn string step state = do
           withExecDirect
             dbc
             string
+            params
             (fetchIterator dbc unlift step state)))
 
 --------------------------------------------------------------------------------
@@ -313,24 +323,26 @@ withHDBC conn label f =
            pure v)
 
 -- | Execute a query directly without preparation.
-withExecDirect :: Ptr EnvAndDbc -> Text -> (forall s. SQLHSTMT s -> IO a) -> IO a
-withExecDirect dbc string cont =
+withExecDirect :: Ptr EnvAndDbc -> Text -> [BindParameter] -> (forall s. SQLHSTMT s -> IO a) -> IO a
+withExecDirect dbc string parameters cont =
   withStmt
     dbc
-    (\stmt -> do
-       void
-         (assertSuccessOrNoData
-            dbc
-            "odbc_SQLExecDirectW"
-            (T.useAsPtr
-               string
-               (\wstring len ->
-                  odbc_SQLExecDirectW
-                    dbc
-                    stmt
-                    (coerce wstring)
-                    (fromIntegral len))))
-       cont stmt)
+    (withBindParameters dbc parameters
+      (\stmt -> do
+        void
+          (assertSuccessOrNoData
+              dbc
+              "odbc_SQLExecDirectW"
+              (T.useAsPtr
+                string
+                (\wstring len ->
+                    odbc_SQLExecDirectW
+                      dbc
+                      stmt
+                      (coerce wstring)
+                      (fromIntegral len))))
+        cont stmt)
+    )
 
 -- | Run the function with a statement.
 withStmt :: Ptr EnvAndDbc -> (forall s. SQLHSTMT s -> IO a) -> IO a
@@ -338,6 +350,69 @@ withStmt hdbc =
   bracket
     (assertNotNull "odbc_SQLAllocStmt" (odbc_SQLAllocStmt hdbc))
     odbc_SQLFreeStmt
+
+withBindParameters :: Ptr EnvAndDbc -> [BindParameter] -> (SQLHSTMT s -> IO a) -> (SQLHSTMT s -> IO a)
+withBindParameters dbc ps go = 
+  foldr
+    (\(i, p) f -> withBindParameter dbc i p f)
+    go
+    (zip [1 ..] ps)
+
+withBindParameter :: Ptr EnvAndDbc -> SQLUSMALLINT -> BindParameter -> (SQLHSTMT s -> IO a) -> (SQLHSTMT s -> IO a)
+withBindParameter dbc paramNo (BindText t) f stmt =
+  T.useAsPtr t
+    (\ptr len ->
+      withMalloc
+        (\lenptr -> do
+          let bytes :: SQLLEN
+              bytes = 2 * fromIntegral len
+              colSize :: SQLULEN
+              colSize = SQLULEN $ fromIntegral len
+          poke lenptr bytes
+          assertSuccess
+            dbc
+            "odbc_SQLBindParameter"
+            (
+              odbc_SQLBindParameter
+                stmt
+                paramNo
+                sql_param_input
+                sql_c_wchar
+                (if len == 0 then sql_wvarchar else sql_wlongvarchar)
+                colSize
+                0
+                (coerce ptr)
+                bytes
+                lenptr
+            )
+          f stmt
+      )
+    )
+withBindParameter dbc paramNo (BindByteString t) f stmt =
+  S.useAsCStringLen t
+    (\(ptr, len) ->
+      withMalloc
+        (\lenptr -> do
+          poke lenptr (fromIntegral len)
+          assertSuccess
+            dbc
+            "odbc_SQLBindParameter"
+            (
+              odbc_SQLBindParameter
+                stmt
+                paramNo
+                sql_param_input
+                sql_c_char
+                (if len == 0 then sql_varchar else sql_longvarchar)
+                (SQLULEN (fromIntegral len))
+                0
+                (coerce ptr)
+                (fromIntegral len)
+                lenptr
+            )
+          f stmt
+      )
+    )
 
 -- | Run an action in a bound thread. This is neccessary due to the
 -- interaction with signals in ODBC and GHC's runtime.
@@ -977,6 +1052,20 @@ foreign import ccall "odbc odbc_SQLDescribeColW"
     -> Ptr SQLSMALLINT
     -> IO RETCODE
 
+foreign import ccall "odbc odbc_SQLBindParameter"
+  odbc_SQLBindParameter
+    :: SQLHSTMT s
+    -> SQLUSMALLINT
+    -> SQLSMALLINT
+    -> SQLCTYPE
+    -> SQLSMALLINT
+    -> SQLULEN
+    -> SQLSMALLINT
+    -> SQLPOINTER
+    -> SQLLEN
+    -> Ptr SQLLEN
+    -> IO RETCODE
+
 foreign import ccall "odbc DATE_STRUCT_year" odbc_DATE_STRUCT_year
  :: Ptr DATE_STRUCT -> IO SQLSMALLINT
 
@@ -1043,6 +1132,9 @@ sql_null_data = (-1)
 
 sql_no_total :: SQLLEN
 sql_no_total = (-4)
+
+sql_param_input :: SQLSMALLINT
+sql_param_input = 1
 
 --------------------------------------------------------------------------------
 -- SQL data type constants
@@ -1143,6 +1235,9 @@ sql_guid = (-11)
 
 sql_c_wchar :: SQLCTYPE
 sql_c_wchar = coerce sql_wchar
+
+sql_c_char :: SQLCTYPE
+sql_c_char = coerce sql_char
 
 -- sql_c_char :: SQLCTYPE
 -- sql_c_char = coerce sql_char

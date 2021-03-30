@@ -33,7 +33,7 @@ repl c = do
       hSetBuffering stdout LineBuffering
       catch
         (catch
-           (do (_, count) <- ODBC.stream c input output (False, 0 :: Int)
+           (do (_, count) <- ODBC.stream c input [] output (False, 0 :: Int)
                putStrLn ("Rows: " ++ show count))
            (\case
               UserInterrupt -> pure ()

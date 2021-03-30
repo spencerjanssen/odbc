@@ -100,20 +100,20 @@ regressions = do
   it
     "Internal.exec can return SQL_NO_DATA"
     (do c <- connectWithString
-        Internal.exec c "DROP TABLE IF EXISTS wibble"
-        Internal.exec c "CREATE TABLE wibble (i integer)"
-        Internal.exec c "DELETE FROM wibble"
+        Internal.exec c "DROP TABLE IF EXISTS wibble" []
+        Internal.exec c "CREATE TABLE wibble (i integer)" []
+        Internal.exec c "DELETE FROM wibble" []
         Internal.close c)
   it
     "Internal.exec multiple statements (https://github.com/fpco/odbc/issues/9)"
     (do c <- connectWithString
-        Internal.exec c "SELECT 1; SELECT 2"
+        Internal.exec c "SELECT 1; SELECT 2" []
         Internal.close c)
   it
     "Internal.exec error in multiple statements (https://github.com/fpco/odbc/issues/9)"
     (do c <- connectWithString
         shouldThrow
-          (Internal.exec c "SELECT 1; SELECT nothing FROM doesntexist")
+          (Internal.exec c "SELECT 1; SELECT nothing FROM doesntexist" [])
           (\case
              Internal.UnsuccessfulReturnCode "odbc_SQLMoreResults" (-1) _ ->
                True
@@ -192,14 +192,16 @@ dataRetrieval = do
   it
     "Basic sanity check"
     (do c <- connectWithString
-        Internal.exec c "DROP TABLE IF EXISTS test"
+        Internal.exec c "DROP TABLE IF EXISTS test" []
         Internal.exec
           c
           "CREATE TABLE test (int integer, text text, bool bit, nt ntext, fl float)"
+          []
         Internal.exec
           c
           "INSERT INTO test VALUES (123, 'abc', 1, 'wib', 2.415), (456, 'def', 0, 'wibble',0.9999999999999), (NULL, NULL, NULL, NULL, NULL)"
-        rows <- Internal.query c "SELECT * FROM test"
+          []
+        rows <- Internal.query c "SELECT * FROM test" []
         Internal.close c
         shouldBe
           (map (map snd) rows)
@@ -220,11 +222,12 @@ dataRetrieval = do
   it
     "Querying commands with no results"
     (do c <- connectWithString
-        rows1 <- Internal.query c "DROP TABLE IF EXISTS no_such_table"
+        rows1 <- Internal.query c "DROP TABLE IF EXISTS no_such_table" []
         rows2 <-
           Internal.stream
             c
             "DROP TABLE IF EXISTS no_such_table"
+            []
             (\s _ -> pure (Stop s))
             []
         shouldBe (map (map snd) (rows1 ++ rows2)) [])
@@ -353,7 +356,7 @@ quickCheckRoundtripEx testMaybes l typ =
                                    (SQLServer.exec c q)
                                    (\e -> do
                                       print (e :: SomeException)
-                                      T.putStrLn (SQLServer.renderQuery q)
+                                      T.putStrLn (snd (SQLServer.renderQuery q))
                                       SQLServer.close c
                                       throwIO e))
                               [Identity result] <-
@@ -373,7 +376,7 @@ quickCheckRoundtripEx testMaybes l typ =
                                       [ "Expected: " ++ show input
                                       , "Actual: " ++ show result
                                       , "Query was: " ++
-                                        T.unpack (SQLServer.renderQuery q)
+                                        T.unpack (snd (SQLServer.renderQuery q))
                                       ]))
                               assert (result == input))))
          in do makeIt l typ id
@@ -408,14 +411,14 @@ quickCheckOneway l typ =
                          in liftIO
                               (onException
                                  (SQLServer.exec c q)
-                                 ((T.putStrLn (SQLServer.renderQuery q)))))
+                                 ((T.putStrLn (snd (SQLServer.renderQuery q))))))
                         let q =
                               "INSERT INTO test VALUES (" <> toSql (input :: t) <>
                               ")"
                         liftIO
                           (onException
                              (SQLServer.exec c q)
-                             ((T.putStrLn (SQLServer.renderQuery q))))
+                             ((T.putStrLn (snd (SQLServer.renderQuery q)))))
                         [Identity result] <-
                           SQLServer.query c "SELECT f FROM test"
                         monitor
@@ -424,7 +427,7 @@ quickCheckOneway l typ =
                                 [ "Expected: " ++ show input
                                 , "Actual: " ++ show (result :: t)
                                 , "Query was: " ++
-                                  T.unpack (SQLServer.renderQuery q)
+                                  T.unpack (snd (SQLServer.renderQuery q))
                                 ]))
                         assert True)))))
 
@@ -438,8 +441,8 @@ quickCheckInternalRoundtrip ::
 quickCheckInternalRoundtrip hstype typ shower unpack =
   beforeAll
     (do c <- connectWithString
-        Internal.exec c "DROP TABLE IF EXISTS test"
-        Internal.exec c ("CREATE TABLE test (f " <> typ <> ")")
+        Internal.exec c "DROP TABLE IF EXISTS test" []
+        Internal.exec c ("CREATE TABLE test (f " <> typ <> ")") []
         pure c)
     (afterAll
        Internal.close
@@ -450,17 +453,17 @@ quickCheckInternalRoundtrip hstype typ shower unpack =
              property
                (\input ->
                   monadicIO
-                    (do Internal.exec c "TRUNCATE TABLE test"
+                    (do Internal.exec c "TRUNCATE TABLE test" []
                         let q =
                               "INSERT INTO test VALUES (" <> shower input <> ")"
                         rows <-
                           liftIO
                             (try
                                (do onException
-                                     (Internal.exec c q)
+                                     (Internal.exec c q [])
                                      (putStrLn "Exec failed.")
                                    onException
-                                     (Internal.query c "SELECT * FROM test")
+                                     (Internal.query c "SELECT * FROM test" [])
                                      (putStrLn "Query failed!")))
                         let expected :: Either String t
                             expected = Right input

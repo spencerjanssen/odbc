@@ -261,6 +261,34 @@ void odbc_ProcessLogMessages(EnvAndDbc *envAndDbc, SQLSMALLINT plm_handle_type, 
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Bind parameters
+
+SQLRETURN odbc_SQLBindParameter(
+  SQLHSTMT      *StatementHandle,
+  SQLUSMALLINT  ParameterNumber,
+  SQLSMALLINT   InputOutputType,
+  SQLSMALLINT   ValueType,
+  SQLSMALLINT   ParameterType,
+  SQLULEN       ColumnSize,
+  SQLSMALLINT   DecimalDigits,
+  SQLPOINTER    ParameterValuePtr,
+  SQLLEN        BufferLength,
+  SQLLEN        *StrLen_or_IndPtr){
+    return SQLBindParameter(
+      *StatementHandle,
+      ParameterNumber,
+      InputOutputType,
+      ValueType,
+      ParameterType,
+      ColumnSize,
+      DecimalDigits,
+      ParameterValuePtr,
+      BufferLength,
+      StrLen_or_IndPtr
+    );
+  }
+
+////////////////////////////////////////////////////////////////////////////////
 // Accessors for DATE_STRUCT
 
 SQLSMALLINT DATE_STRUCT_year(DATE_STRUCT *d){

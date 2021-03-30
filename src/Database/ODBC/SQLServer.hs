@@ -394,15 +394,16 @@ query ::
   => Connection -- ^ A connection to the database.
   -> Query -- ^ SQL query.
   -> m [row]
-query c (Query ps) = do
-  rows <- Internal.query c (renderParts (toList ps))
+query c q = do
+  let (bindings, queryText) = renderQuery q
+  rows <- Internal.query c queryText bindings
   case mapM (fromRow . map snd) rows of
     Right rows' -> pure rows'
     Left e -> liftIO (throwIO (Internal.DataRetrievalError e))
 
 -- | Render a query to a plain text string. Useful for debugging and
 -- testing.
-renderQuery :: Query -> Text
+renderQuery :: Query -> ([Internal.BindParameter], Text)
 renderQuery (Query ps) = (renderParts (toList ps))
 
 -- | Stream results like a fold with the option to stop at any time.
@@ -418,10 +419,12 @@ stream ::
   -- evaluated each iteration.
   -> m state
   -- ^ Final result, produced by the stepper function.
-stream c (Query ps) cont nil =
+stream c q cont nil = do
+  let (bindings, queryText) = renderQuery q
   Internal.stream
     c
-    (renderParts (toList ps))
+    queryText
+    bindings
     (\state row ->
        case fromRow (map snd row) of
          Left e -> liftIO (throwIO (Internal.DataRetrievalError e))
@@ -434,7 +437,9 @@ exec ::
   => Connection -- ^ A connection to the database.
   -> Query -- ^ SQL statement.
   -> m ()
-exec c (Query ps) = Internal.exec c (renderParts (toList ps))
+exec c q = Internal.exec c queryText bindings
+ where
+   (bindings, queryText) = renderQuery q
 
 --------------------------------------------------------------------------------
 -- Query building
@@ -444,39 +449,39 @@ queryParts :: Query -> Seq Part
 queryParts (Query parts) = parts
 
 -- | Convert a list of parts into a query.
-renderParts :: [Part] -> Text
-renderParts = T.concat . map renderPart
+renderParts :: [Part] -> ([Internal.BindParameter], Text)
+renderParts = foldMap renderPart
 
 -- | Render a query part to a query.
-renderPart :: Part -> Text
+renderPart :: Part -> ([Internal.BindParameter], Text)
 renderPart =
   \case
-    TextPart t -> t
+    TextPart t -> (mempty, t)
     ValuePart v -> renderValue v
 
 -- | Render a value to a query.
-renderValue :: Value -> Text
+renderValue :: Value -> ([Internal.BindParameter], Text)
 renderValue =
   \case
-    NullValue -> "NULL"
-    TextValue t -> "(N'" <> T.concatMap escapeChar t <> "')"
+    NullValue -> (mempty, "NULL")
+    TextValue t -> ([Internal.BindText t], "?")
     BinaryValue (Internal.Binary bytes) ->
-      "0x" <>
+      (mempty, "0x" <>
       T.concat
         (map
            (Formatting.sformat
               (Formatting.left 2 '0' Formatting.%. Formatting.hex))
-           (S.unpack bytes))
-    ByteStringValue xs ->
-      "('" <> T.concat (map escapeChar8 (S.unpack xs)) <> "')"
-    BoolValue True -> "1"
-    BoolValue False -> "0"
-    ByteValue n -> Formatting.sformat Formatting.int n
-    DoubleValue d -> Formatting.sformat Formatting.float d
-    FloatValue d -> Formatting.sformat Formatting.float (realToFrac d :: Double)
-    IntValue d -> Formatting.sformat Formatting.int d
-    DayValue d -> Formatting.sformat ("'" % Formatting.dateDash % "'") d
+           (S.unpack bytes)))
+    ByteStringValue xs -> ([Internal.BindByteString xs], "?")
+    BoolValue True -> (mempty, "1")
+    BoolValue False -> (mempty, "0")
+    ByteValue n -> (mempty, Formatting.sformat Formatting.int n)
+    DoubleValue d -> (mempty, Formatting.sformat Formatting.float d)
+    FloatValue d -> (mempty, Formatting.sformat Formatting.float (realToFrac d :: Double))
+    IntValue d -> (mempty, Formatting.sformat Formatting.int d)
+    DayValue d -> (mempty, Formatting.sformat ("'" % Formatting.dateDash % "'") d)
     TimeOfDayValue (TimeOfDay hh mm ss) ->
+      (mempty,
       Formatting.sformat
         ("'" % Formatting.left 2 '0' % ":" % Formatting.left 2 '0' % ":" %
          Formatting.string %
@@ -484,7 +489,9 @@ renderValue =
         hh
         mm
         (renderFractional ss)
+      )
     LocalTimeValue (LocalTime d (TimeOfDay hh mm ss)) ->
+      (mempty,
       Formatting.sformat
         ("'" % Formatting.dateDash % " " % Formatting.left 2 '0' % ":" %
          Formatting.left 2 '0' %
@@ -495,6 +502,7 @@ renderValue =
         hh
         mm
         (renderFractional ss)
+      )
 
 -- | Obviously, this is not fast. But it is correct. A faster version
 -- can be written later.
